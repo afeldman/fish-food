@@ -1,0 +1,138 @@
+name: Update Fish Food
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: "Binary name (must match Food/<name>.lua)"
+        required: true
+        type: string
+      version:
+        description: "Release version without leading v (e.g. 1.2.3)"
+        required: true
+        type: string
+      description:
+        description: "One-line description for the food entry"
+        required: true
+        type: string
+      github_repo:
+        description: "Source repo in owner/repo format"
+        required: true
+        type: string
+      archive_template:
+        description: "Archive filename template. Tokens: {name} {version} {os} {arch}"
+        required: false
+        type: string
+        default: "{name}_{version}_{os}_{arch}.tar.gz"
+    secrets:
+      fish_food_token:
+        description: "PAT with repo write access to fish-food"
+        required: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fish-food
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.fish_food_token }}
+
+      - name: Download artifacts and compute sha256
+        id: checksums
+        env:
+          NAME: ${{ inputs.name }}
+          VERSION: ${{ inputs.version }}
+          REPO: ${{ inputs.github_repo }}
+          TMPL: ${{ inputs.archive_template }}
+        run: |
+          VERSION="${VERSION#v}"
+          BASE="https://github.com/${REPO}/releases/download/v${VERSION}"
+
+          compute_sha() {
+            local os=$1 arch=$2
+            local file="${TMPL}"
+            file="${file/\{name\}/$NAME}"
+            file="${file/\{version\}/$VERSION}"
+            file="${file/\{os\}/$os}"
+            file="${file/\{arch\}/$arch}"
+            local url="${BASE}/${file}"
+            local sha
+            if sha=$(curl -fsSL "$url" | sha256sum | awk '{print $1}'); then
+              echo "${sha}"
+            else
+              echo ""
+            fi
+          }
+
+          echo "darwin_amd64=$(compute_sha darwin amd64)"   >> "$GITHUB_OUTPUT"
+          echo "darwin_arm64=$(compute_sha darwin arm64)"   >> "$GITHUB_OUTPUT"
+          echo "linux_amd64=$(compute_sha linux amd64)"     >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$(compute_sha linux arm64)"     >> "$GITHUB_OUTPUT"
+
+      - name: Write Lua food file
+        env:
+          NAME: ${{ inputs.name }}
+          VERSION: ${{ inputs.version }}
+          DESC: ${{ inputs.description }}
+          REPO: ${{ inputs.github_repo }}
+          TMPL: ${{ inputs.archive_template }}
+          SHA_DARWIN_AMD64: ${{ steps.checksums.outputs.darwin_amd64 }}
+          SHA_DARWIN_ARM64: ${{ steps.checksums.outputs.darwin_arm64 }}
+          SHA_LINUX_AMD64:  ${{ steps.checksums.outputs.linux_amd64 }}
+          SHA_LINUX_ARM64:  ${{ steps.checksums.outputs.linux_arm64 }}
+        run: |
+          BASE="https://github.com/${REPO}/releases/download/v${VERSION}"
+
+          url_for() {
+            local os=$1 arch=$2
+            local f="${TMPL}"
+            f="${f/\{name\}/$NAME}"; f="${f/\{version\}/$VERSION}"
+            f="${f/\{os\}/$os}";     f="${f/\{arch\}/$arch}"
+            echo "${BASE}/${f}"
+          }
+
+          pkg_entry() {
+            local os=$1 arch=$2 sha=$3
+            cat <<EOF
+          {
+              os = "${os}",
+              arch = "${arch}",
+              url = "$(url_for $os $arch)",
+              sha256 = "${sha}",
+              resources = {
+                  { path = "${NAME}", installpath = "bin/${NAME}", executable = true }
+              }
+          },
+          EOF
+          }
+
+          cat > "Food/${NAME}.lua" <<EOF
+          local name = "${NAME}"
+          local version = "${VERSION}"
+
+          food = {
+              name = name,
+              description = "${DESC}",
+              homepage = "https://github.com/${REPO}",
+              version = version,
+              packages = {
+          $(pkg_entry darwin amd64 "$SHA_DARWIN_AMD64")
+          $(pkg_entry darwin arm64 "$SHA_DARWIN_ARM64")
+          $(pkg_entry linux  amd64 "$SHA_LINUX_AMD64")
+          $(pkg_entry linux  arm64 "$SHA_LINUX_ARM64")
+              }
+          }
+          EOF
+
+      - name: Commit and push
+        env:
+          NAME: ${{ inputs.name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "Food/${NAME}.lua"
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "chore: update ${NAME} to v${VERSION}"
+          git push
