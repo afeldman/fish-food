@@ -1,0 +1,115 @@
+name: Update Fish Food (Bash/Source)
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: "Food name (must match Food/<name>.lua)"
+        required: true
+        type: string
+      version:
+        description: "Release version (e.g. v1.2.3 or 1.2.3)"
+        required: true
+        type: string
+      description:
+        description: "One-line description for the food entry"
+        required: true
+        type: string
+      github_repo:
+        description: "Source repo in owner/repo format"
+        required: true
+        type: string
+      resources:
+        description: "Comma-separated list of script filenames to install (e.g. foo,bar,baz)"
+        required: true
+        type: string
+    secrets:
+      fish_food_token:
+        description: "PAT with repo write access to fish-food"
+        required: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fish-food
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.fish_food_token }}
+
+      - name: Compute sha256 of source tarball
+        id: checksums
+        env:
+          VERSION: ${{ inputs.version }}
+          REPO: ${{ inputs.github_repo }}
+        run: |
+          VERSION="${VERSION#v}"
+          TARBALL_URL="https://github.com/${REPO}/archive/refs/tags/v${VERSION}.tar.gz"
+          SHA=$(curl -fsSL "$TARBALL_URL" | sha256sum | awk '{print $1}')
+          echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tarball_url=${TARBALL_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Write Lua food file
+        env:
+          NAME: ${{ inputs.name }}
+          VERSION: ${{ steps.checksums.outputs.version }}
+          TARBALL_URL: ${{ steps.checksums.outputs.tarball_url }}
+          SHA256: ${{ steps.checksums.outputs.sha256 }}
+          DESC: ${{ inputs.description }}
+          REPO: ${{ inputs.github_repo }}
+          RESOURCES: ${{ inputs.resources }}
+        run: |
+          REPO_NAME="${REPO##*/}"
+
+          build_resources() {
+            IFS=',' read -ra RES_LIST <<< "$RESOURCES"
+            for res in "${RES_LIST[@]}"; do
+              echo "                { path = \"${REPO_NAME}-${VERSION}/${res}\", installpath = \"bin/${res}\", executable = true },"
+            done
+          }
+
+          pkg_entry() {
+            local os=$1 arch=$2
+            cat <<EOF
+          {
+              os = "${os}",
+              arch = "${arch}",
+              url = "${TARBALL_URL}",
+              sha256 = "${SHA256}",
+              resources = {
+          $(build_resources)
+              }
+          },
+          EOF
+          }
+
+          cat > "Food/${NAME}.lua" <<EOF
+          local name = "${NAME}"
+          local version = "${VERSION}"
+
+          food = {
+              name = name,
+              description = "${DESC}",
+              homepage = "https://github.com/${REPO}",
+              version = version,
+              packages = {
+          $(pkg_entry darwin amd64)
+          $(pkg_entry darwin arm64)
+          $(pkg_entry linux  amd64)
+          $(pkg_entry linux  arm64)
+              }
+          }
+          EOF
+
+      - name: Commit and push
+        env:
+          NAME: ${{ inputs.name }}
+          VERSION: ${{ steps.checksums.outputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "Food/${NAME}.lua"
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "chore: update ${NAME} to v${VERSION}"
+          git push

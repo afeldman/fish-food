@@ -24,6 +24,11 @@ on:
         required: false
         type: string
         default: "{name}_{version}_{os}_{arch}.tar.gz"
+      binary:
+        description: "Binary filename inside the archive (defaults to name)"
+        required: false
+        type: string
+        default: ""
     secrets:
       fish_food_token:
         description: "PAT with repo write access to fish-food"
@@ -73,6 +78,7 @@ jobs:
       - name: Write Lua food file
         env:
           NAME: ${{ inputs.name }}
+          BINARY: ${{ inputs.binary || inputs.name }}
           VERSION: ${{ inputs.version }}
           DESC: ${{ inputs.description }}
           REPO: ${{ inputs.github_repo }}
@@ -82,6 +88,7 @@ jobs:
           SHA_LINUX_AMD64:  ${{ steps.checksums.outputs.linux_amd64 }}
           SHA_LINUX_ARM64:  ${{ steps.checksums.outputs.linux_arm64 }}
         run: |
+          BINARY="${BINARY:-$NAME}"
           BASE="https://github.com/${REPO}/releases/download/v${VERSION}"
 
           url_for() {
@@ -101,7 +108,7 @@ jobs:
               url = "$(url_for $os $arch)",
               sha256 = "${sha}",
               resources = {
-                  { path = "${NAME}", installpath = "bin/${NAME}", executable = true }
+                  { path = "${BINARY}", installpath = "bin/${BINARY}", executable = true }
               }
           },
           EOF
