@@ -41,6 +41,7 @@ jobs:
       - name: Checkout fish-food
         uses: actions/checkout@v4
         with:
+          repository: afeldman/fish-food
           token: ${{ secrets.fish_food_token }}
 
       - name: Download artifacts and compute sha256
